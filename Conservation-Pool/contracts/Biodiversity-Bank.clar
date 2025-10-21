@@ -21,6 +21,9 @@
 (define-constant ERR-VOTING-PERIOD-ENDED (err u111))
 (define-constant ERR-DUPLICATE-VOTE (err u112))
 (define-constant ERR-PROJECT-INACTIVE (err u113))
+(define-constant ERR-INVALID-CATEGORY (err u114))
+(define-constant ERR-INVALID-STRING-INPUT (err u115))
+(define-constant ERR-INVALID-VOTE-DECISION (err u116))
 
 ;; Supported conservation project categories
 (define-constant conservation-categories 
@@ -30,6 +33,14 @@
         "marine"
         "climate"
         "biodiversity"
+    )
+)
+
+;; Valid vote decisions
+(define-constant valid-vote-options
+    (list
+        "approve"
+        "reject"
     )
 )
 
@@ -117,6 +128,39 @@
 ;; Voting window duration in blocks
 (define-data-var voting-window-blocks uint u1440)
 
+;; Helper function to validate category
+(define-private (is-valid-category (category (string-ascii 20)))
+    (or
+        (is-eq category "wildlife")
+        (or (is-eq category "forest")
+        (or (is-eq category "marine")
+        (or (is-eq category "climate")
+            (is-eq category "biodiversity")))))
+)
+
+;; Helper function to validate vote decision
+(define-private (is-valid-vote (vote (string-ascii 10)))
+    (or
+        (is-eq vote "approve")
+        (is-eq vote "reject")
+    )
+)
+
+;; Helper function to validate string is not empty
+(define-private (is-non-empty-string (str (string-ascii 500)))
+    (> (len str) u0)
+)
+
+;; Helper function to validate project exists and return data
+(define-private (validate-project-exists (project-id uint))
+    (let
+        (
+            (validated-id (if (<= project-id (var-get next-available-project-id)) project-id u0))
+        )
+        (ok (unwrap! (map-get? conservation-projects { project-identifier: validated-id }) ERR-PROJECT-NOT-FOUND))
+    )
+)
+
 ;; Activates the conservation platform contract
 (define-public (initialize-platform)
     (begin
@@ -150,6 +194,11 @@
             (new-project-id (+ (var-get next-available-project-id) u1))
             (calculated-end-block (+ block-height project-duration-blocks))
         )
+        ;; Input validation
+        (asserts! (is-non-empty-string title) ERR-INVALID-STRING-INPUT)
+        (asserts! (is-non-empty-string description) ERR-INVALID-STRING-INPUT)
+        (asserts! (is-non-empty-string location) ERR-INVALID-STRING-INPUT)
+        (asserts! (is-valid-category category) ERR-INVALID-CATEGORY)
         (asserts! (> funding-target u0) ERR-INVALID-AMOUNT)
         (asserts! (> project-duration-blocks u0) ERR-INVALID-DEADLINE)
         
@@ -188,14 +237,17 @@
     (completion-deadline-block uint))
     (let
         (
-            (project-data (unwrap! (map-get? conservation-projects { project-identifier: project-id }) ERR-PROJECT-NOT-FOUND))
+            (validated-project-id (if (<= project-id (var-get next-available-project-id)) project-id u0))
+            (project-data (try! (validate-project-exists validated-project-id)))
             (current-milestone-count (get milestones-achieved project-data))
         )
+        ;; Input validation
+        (asserts! (is-non-empty-string milestone-details) ERR-INVALID-STRING-INPUT)
         (asserts! (is-eq (get project-creator project-data) tx-sender) ERR-UNAUTHORIZED-PROJECT-ACTION)
         (asserts! (> completion-deadline-block block-height) ERR-INVALID-DEADLINE)
         
         (map-set project-milestones
-            { project-identifier: project-id, milestone-number: current-milestone-count }
+            { project-identifier: validated-project-id, milestone-number: current-milestone-count }
             {
                 milestone-description: milestone-details,
                 target-completion-block: completion-deadline-block,
@@ -215,14 +267,17 @@
     (evidence-hash (buff 32)))
     (let
         (
-            (project-data (unwrap! (map-get? conservation-projects { project-identifier: project-id }) ERR-PROJECT-NOT-FOUND))
-            (milestone-data (unwrap! (map-get? project-milestones { project-identifier: project-id, milestone-number: milestone-id }) ERR-MILESTONE-NOT-FOUND))
+            (validated-project-id (if (<= project-id (var-get next-available-project-id)) project-id u0))
+            (project-data (try! (validate-project-exists validated-project-id)))
+            (validated-milestone-id (if (<= milestone-id (get milestones-achieved project-data)) milestone-id u0))
+            (milestone-data (unwrap! (map-get? project-milestones { project-identifier: validated-project-id, milestone-number: validated-milestone-id }) ERR-MILESTONE-NOT-FOUND))
         )
+        ;; Validation
         (asserts! (is-eq (get project-creator project-data) tx-sender) ERR-UNAUTHORIZED-PROJECT-ACTION)
         (asserts! (not (get completion-status milestone-data)) ERR-MILESTONE-ALREADY-COMPLETED)
         
         (map-set project-milestones
-            { project-identifier: project-id, milestone-number: milestone-id }
+            { project-identifier: validated-project-id, milestone-number: validated-milestone-id }
             (merge milestone-data {
                 completion-status: true,
                 verification-evidence: evidence-hash
@@ -230,7 +285,7 @@
         )
         
         (map-set conservation-projects
-            { project-identifier: project-id }
+            { project-identifier: validated-project-id }
             (merge project-data {
                 milestones-achieved: (+ (get milestones-achieved project-data) u1)
             })
@@ -246,9 +301,12 @@
     (vote-decision (string-ascii 10)))
     (let
         (
-            (project-data (unwrap! (map-get? conservation-projects { project-identifier: project-id }) ERR-PROJECT-NOT-FOUND))
-            (previous-vote (map-get? governance-votes { project-identifier: project-id, participant-address: tx-sender }))
+            (validated-project-id (if (<= project-id (var-get next-available-project-id)) project-id u0))
+            (project-data (try! (validate-project-exists validated-project-id)))
+            (previous-vote (map-get? governance-votes { project-identifier: validated-project-id, participant-address: tx-sender }))
         )
+        ;; Input validation
+        (asserts! (is-valid-vote vote-decision) ERR-INVALID-VOTE-DECISION)
         (asserts! (is-eq (get current-status project-data) "active") ERR-PROJECT-INACTIVE)
         (asserts! (is-none previous-vote) ERR-DUPLICATE-VOTE)
         (asserts! (>= (- (get expiration-block-height project-data) block-height) (var-get voting-window-blocks)) ERR-VOTING-PERIOD-ENDED)
@@ -258,7 +316,7 @@
         (try! (stx-transfer? voting-stake tx-sender (as-contract tx-sender)))
         
         (map-set governance-votes
-            { project-identifier: project-id, participant-address: tx-sender }
+            { project-identifier: validated-project-id, participant-address: tx-sender }
             {
                 staked-token-amount: voting-stake,
                 voting-block-height: block-height,
@@ -267,7 +325,7 @@
         )
         
         (map-set conservation-projects
-            { project-identifier: project-id }
+            { project-identifier: validated-project-id }
             (merge project-data {
                 community-vote-tally: (+ (get community-vote-tally project-data) u1)
             })
@@ -286,30 +344,33 @@
     (beneficiary-count uint))
     (let
         (
-            (project-data (unwrap! (map-get? conservation-projects { project-identifier: project-id }) ERR-PROJECT-NOT-FOUND))
+            (validated-project-id (if (<= project-id (var-get next-available-project-id)) project-id u0))
+            (project-data (try! (validate-project-exists validated-project-id)))
+            ;; Validate and sanitize inputs
+            (validated-trees (if (<= trees-count u1000000000) trees-count u0))
+            (validated-hectares (if (<= protected-hectares u1000000000) protected-hectares u0))
+            (validated-carbon (if (<= carbon-tons u1000000000) carbon-tons u0))
+            (validated-species (if (<= species-count u1000000) species-count u0))
+            (validated-beneficiaries (if (<= beneficiary-count u1000000000) beneficiary-count u0))
         )
+        ;; Validation
         (asserts! (is-eq (get project-creator project-data) tx-sender) ERR-UNAUTHORIZED-PROJECT-ACTION)
-        (asserts! (>= trees-count u0) ERR-INVALID-AMOUNT)
-        (asserts! (>= protected-hectares u0) ERR-INVALID-AMOUNT)
-        (asserts! (>= carbon-tons u0) ERR-INVALID-AMOUNT)
-        (asserts! (>= species-count u0) ERR-INVALID-AMOUNT)
-        (asserts! (>= beneficiary-count u0) ERR-INVALID-AMOUNT)
         
         (map-set impact-measurements
-            { project-identifier: project-id }
+            { project-identifier: validated-project-id }
             {
-                trees-planted-or-protected: trees-count,
-                hectares-under-protection: protected-hectares,
-                carbon-offset-tons: carbon-tons,
-                species-protected-count: species-count,
-                community-members-benefited: beneficiary-count
+                trees-planted-or-protected: validated-trees,
+                hectares-under-protection: validated-hectares,
+                carbon-offset-tons: validated-carbon,
+                species-protected-count: validated-species,
+                community-members-benefited: validated-beneficiaries
             }
         )
         
         (map-set conservation-projects
-            { project-identifier: project-id }
+            { project-identifier: validated-project-id }
             (merge project-data {
-                total-impact-score: (+ trees-count protected-hectares carbon-tons species-count beneficiary-count)
+                total-impact-score: (+ validated-trees validated-hectares validated-carbon validated-species validated-beneficiaries)
             })
         )
         (ok true)
